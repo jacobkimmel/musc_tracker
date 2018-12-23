@@ -5,7 +5,7 @@ import argparse
 import os
 import glob
 from mask_parser import MaskParser
-from labeled_movie_maker import TrackingMovie
+from labeled_movie_maker import TrackingMovie, ExportTrackingMovie
 from bipartite_tracker import BipartiteTracker
 from tracking_fnx import track_fov
 import matplotlib.pyplot as plt
@@ -23,6 +23,9 @@ parser.add_argument('--min_t', type=int, default=0, help='start time for trackin
 parser.add_argument('--max_t', type=int, default=None, help='end time for tracking')
 parser.add_argument('--singlethread', action='store_true', help='run tracking on a single thread. can avoid issues with matplotlib IO bottlenecking.')
 parser.add_argument('--novideo', action='store_true', help='do not export tracking videos (single threaded bottleneck)')
+parser.add_argument('--prefix', type=str, default='', 
+                    help='prefix for outputs.')
+
 args = parser.parse_args()
 
 xys = [str(x).zfill(int(np.log10(args.max_xy)+1)) for x in range(1,args.max_xy + 1)]
@@ -36,12 +39,13 @@ def track(i, xys, args):
     max_t = args.max_t
 
     freq_dir = args.well_dir
+    prefix = args.prefix
     out_dir = freq_dir
     mask_regex = '*xy' + xy + '*' + args.mask_regex
     img_regex  = '*xy' + xy + '*' + args.img_regex
 
     well = os.path.split(freq_dir)[-1]
-    out_lab = well + '_xy' + xy + '_'
+    out_lab = well + '_xy' + xy + '_' + prefix + '_'
 
     print('Tracking initiate : ', out_lab)
     if args.app_model:
@@ -84,7 +88,21 @@ def make_movie(freq_dir, mp, xc, yc, img_regex, out_lab, min_t, max_t):
     plt.close()
 
     print('Saved ', movie_path)
-
+    
+def make_ffmpeg_movie(freq_dir, mp, xc, yc, img_regex, out_lab, min_t, max_t):
+    
+    out_dir = freq_dir
+    
+    imgp = MaskParser(freq_dir,
+                regex=img_regex, no_parsing=True)
+    movie_path = os.path.join(out_dir, out_lab + 'movie.avi')
+    etm = ExportTrackingMovie(imgp.img_files[min_t:max_t],
+            xc, yc,
+            masks = mp.img_files[min_t:max_t],
+            out_file = movie_path,
+            fps=5)
+    etm.save_frames()
+    #etm.call_ffmpeg()
 
 
 from functools import partial
@@ -102,7 +120,22 @@ else:
 
     p.close()
 
+
+def movie_wrapper(i, res):
+    params = res[i]
+    make_ffmpeg_movie(*params)
+    return 
+
+part_movie = partial(movie_wrapper, res=res)
+
 if not args.novideo:
-    for i in range(len(res)):
-        params = res[i]
-        make_movie(*params)
+    
+    if args.singlethread:
+        for i in range(len(res)):
+            params = res[i]
+            make_ffmpeg_movie(*params)
+            
+    else:
+        p = multiprocessing.Pool()
+        movie_out = p.map(part_movie, range(len(res)))
+        p.close()

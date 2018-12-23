@@ -3,12 +3,15 @@ Mask parser
 '''
 
 import os
+import os.path as osp
 import numpy as np
 from PIL import Image
 import glob
 import pandas as pd
+from skimage.io import imsave
 from skimage.measure import label, regionprops
 import re
+import tqdm
 
 class MaskParser(object):
 
@@ -100,3 +103,69 @@ class MaskParser(object):
             self.seq_bboxes.append(bboxes)
 
         return
+    
+def fill_mask_gaps(M, gap_size: int=3):
+    
+    F = M.copy().astype(np.bool)
+    T = M.shape[0]
+    
+    # for every frame not at the end or beginning, 
+    # check if it is part of gap
+    for t in range(1, T-1):
+        
+        preceeding = M[max(0, t-gap_size):t,:,:].max(0) # H, W boolean
+        succeeding = M[t:min(T, t+gap_size),:,:].max(0) # H, W boolean
+        
+        both = np.logical_and(preceeding, succeeding) # H, W for time 
+        rows, cols = np.where(both)
+        F[t,rows.astype('int'),cols.astype('int')] = True
+    return F
+
+class MaskInterpolator(object):
+    def __init__(self, 
+                 mask_dir: str, 
+                 mask_glob: str='*.png',
+                 output_suffix: str='_temporal_smoothing', 
+                 gap_size: int=5) -> None:
+        '''Interpolate masks in a directory'''
+        
+        self.mask_dir = mask_dir
+        self.mask_glob = mask_glob
+        self.gap_size = gap_size
+        self.output_suffix = output_suffix
+        
+        self.load_masks()
+    
+    def load_masks(self,) -> None:
+        self.mask_files = sorted(glob.glob(
+                            osp.join(self.mask_dir, self.mask_glob)))
+        print('Found %d mask files' % len(self.mask_files))
+        
+        self.img_shape = np.array(Image.open(self.mask_files[0])).shape
+        print('MASK SHAPE', self.img_shape)
+        self.mask_array = np.zeros((len(self.mask_files),) + self.img_shape, 
+                                   dtype=np.bool)
+        for t in range(len(self.mask_files)):
+            self.mask_array[t, :, :] = np.array(Image.open(self.mask_files[t]))
+            
+        self.mask_array = self.mask_array.astype(np.bool)
+        
+    def fill_gaps(self,) -> None:
+        self.filled_array = fill_mask_gaps(self.mask_array,
+                                          gap_size=self.gap_size)
+        print('FILLED MASK SHAPE', self.filled_array.shape)
+        return
+    
+    def export_filled_masks(self,) -> None:
+        
+        for t in tqdm.tqdm(range(self.filled_array.shape[0]), desc='exporting masks'):
+            
+            bname = osp.splitext(osp.basename(self.mask_files[t]))[0] + self.output_suffix
+            
+            outname = osp.join(self.mask_dir,
+                              bname + '.png')
+            
+            M = self.filled_array[t, :, :].astype(np.bool).astype(np.uint8)*255
+            imsave(outname, M)
+        return
+            

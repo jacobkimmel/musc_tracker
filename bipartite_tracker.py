@@ -590,7 +590,7 @@ class BipartiteTracker(object):
         return X_scaled
 
     def _make_cost_matrix(self, positions0, positions1, bbox0, bbox1,
-                            im0, im1, model, max_dist=20, augment=False):
+                            im0, im1, model, max_dist=20, augment=False, gaps_filled=None):
         '''
         Generates a cost matrix for linking positions in two conditions.
         Cost based on Euclidean distance and bounding box overlap.
@@ -609,11 +609,12 @@ class BipartiteTracker(object):
             (min_row, min_col, max_row, max_col).
         augment : boolean.
             Augment matrix to make square with birth/death matrices.
-
         im0, im1 : ndarray.
             images for `position0`, `position1`.
         max_dist : float.
             maximum linking distance in space.
+        gaps_filled : np.ndarray
+            [i, dt] object index and number of gaps filled.
 
         Returns
         -------
@@ -657,6 +658,9 @@ class BipartiteTracker(object):
         a2, b2 = self.cost_weights[2,:] # appearance, exp
 
         d = a0*dms**b0 + a1*bbs**b1 + a2*a_cms**b2
+
+        if gaps_filled is not None:
+          pass
 
         if self.save_costs:
             self.dms.append(dms)
