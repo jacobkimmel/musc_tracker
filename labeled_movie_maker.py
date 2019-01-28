@@ -116,13 +116,19 @@ class TrackingMovie(object):
 
         self.anim.save(self.out_file, writer=writer)
         return
-    
+
 class ExportTrackingMovie(object):
 
-    def __init__(self, imgs, tracksX, tracksY,
+    def __init__(self, imgs,
+                    tracksX,
+                    tracksY,
                     masks=None,
-                    figsize=(8,8), out_file=None,
-                    fps=10, min_t=0, max_t=None):
+                    figsize=(8,8),
+                    out_file=None,
+                    fps=10,
+                    min_t=0,
+                    max_t=None,
+                    suffix=None):
         '''
         Generates labeled tracking movies for images in `img_dir` with
         segmentation masks in `seg_dir` and tracks in `tracksX`, `tracksY`.
@@ -153,28 +159,36 @@ class ExportTrackingMovie(object):
 
         self.x = tracksX.astype('int32')
         self.y = tracksY.astype('int32')
-        
+        if len(self.x.shape)==1:
+            self.x = np.expand_dims(self.x, 0)
+        if len(self.y.shape)==1:
+            self.y = np.expand_dims(self.y, 0)
+
         self._set_colors()
-        
+
         im_file = self.imgs[0]
         self.prefix = osp.splitext(osp.basename(im_file))[0].split('t')[0]
         self.out_dir = osp.split(self.out_file)[0]
+        if suffix is None:
+            self.suffix = '_movieframe'
+        else:
+            self.suffix = suffix
 
     def _scale_brightness(self, I):
         '''Scales brightness'''
         Iscale = ( (I - I.min()) / (I-I.min()).max() ) * 255
         return Iscale
-    
-    
+
+
     def _set_colors(self, n_colors: int=10,) -> None:
         self.n_colors = n_colors
         # N, 3 array of RGB colors, [0,255]
-        self.colors = (np.array(sns.husl_palette(n_colors, h=.5)) * 255).astype('int')  
+        self.colors = (np.array(sns.husl_palette(n_colors, h=.5)) * 255).astype('int')
         # shuffle the colors so adjacent cells aren't similar colors
         self.colors = self.colors[np.random.choice(np.arange(
             self.colors.shape[0]), size=self.colors.shape[0], replace=False).astype('int'), :]
         return
-    
+
     def _label_frame(self, i: int):
         '''
         Label a single frame of the movie.
@@ -191,7 +205,7 @@ class ExportTrackingMovie(object):
         draw = ImageDraw.Draw(Ip)
         for c in range(self.x.shape[0]):
             chosen_color = tuple(self.colors[c % self.n_colors, :].tolist())
-    
+
             if np.isnan(self.x[c,i]):
                 continue
             else:
@@ -211,35 +225,32 @@ class ExportTrackingMovie(object):
             A[binary_dilation(find_boundaries(M), disk(1)), :] = I.mean() + I.std()*4
 
         return A
-    
+
     def save_frames(self,) -> None:
         print('SAVING FRAMES FOR %s' % self.prefix)
-    
+
         for t in range(len(self.imgs)):
-            
-            I_label = self._label_frame(t)            
-            bname = self.prefix + '_movieframe_t' + str(t).zfill(4) + '.png'
-            
+
+            I_label = self._label_frame(t)
+            bname = self.prefix + self.suffix + '_t' + str(t).zfill(4) + '.png'
+
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 imsave(osp.join(self.out_dir, bname), I_label)
-            
+
         return
-            
+
     def call_ffmpeg(self,) -> None:
-        
-        cmd = ['ffmpeg', '-y', 
-               '-r', str(self.fps), 
+
+        cmd = ['ffmpeg', '-y',
+               '-r', str(self.fps),
                '-f', 'image2',
-               '-i', osp.join(self.out_dir, self.prefix + '_movieframe_t%04d.png'), 
+               '-i', osp.join(self.out_dir, self.prefix+self.suffix+'_t%04d.png'),
                 '-b:v 8000k',
-                '-vcodec', 'libx264', 
-                '-crf', '25', 
-                '-pix_fmt', 'yuv420p', 
-                osp.join(self.out_dir, self.prefix + '_movie_ffmpeg.mp4')]
+                '-vcodec', 'libx264',
+                '-crf', '25',
+                '-pix_fmt', 'yuv420p',
+                osp.join(self.out_dir, self.prefix + self.suffix + '_movie_ffmpeg.mp4')]
         print('FFMPEG CALL:')
         print(cmd)
         subprocess.run(" ".join(cmd), shell=True, cwd=self.out_dir)
-    
-    
-

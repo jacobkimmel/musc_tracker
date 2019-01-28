@@ -14,6 +14,7 @@ from torchvision.models import squeezenet1_1
 from sklearn.model_selection import StratifiedKFold
 from qc_model_trainer import Trainer
 from qc_dataprep import TrackParser, TrackDataset, RandomNoise
+from qc_dataprep import TrackImageDataset, imgnet_trans
 
 def mkdir_f(d):
     if not osp.exists(d):
@@ -25,9 +26,9 @@ class TrackClassifier(nn.Module):
         n_dimensions: int=2,
         n_classes: int=2,
         n_hidden: int=1024,
-        n_features: int=6,
+        n_features: int=17,
         rnn_unit: str='gru',
-        use_images: bool=False,
+        use_images: bool=True,
         dropout_p: float=0.3) -> None:
         '''Classification model for tracking inputs
 
@@ -59,6 +60,7 @@ class TrackClassifier(nn.Module):
         self.n_features = n_features
         self.rnn_unit = rnn_unit
         self.dropout_p = dropout_p
+        self.use_images = use_images
 
         if rnn_unit is None:
             pass
@@ -115,7 +117,7 @@ class TrackClassifier(nn.Module):
         self.clf = nn.Sequential(
             nn.Linear(rnn_out_units + feat_out_units + im_out_units,
                       256),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
             nn.Linear(256, self.n_classes),
             nn.ReLU(inplace=True),
         )
@@ -150,9 +152,9 @@ class TrackClassifier(nn.Module):
         else:
             clf_vec = feat_scores
 
-        if x_img is not None:
+        if x_img is not None and self.use_images:
             img_vec = self.im_conv(x_img)
-            clf_vec = torch.cat([clf_vec, img_vec])
+            clf_vec = torch.cat([clf_vec, img_vec], dim=1)
 
         scores = self.clf(clf_vec)
         return scores
@@ -184,12 +186,14 @@ def train_rnn_model_cv(params: dict,):
 
         train_track_ds = TrackDataset(tp.tracks[train_idx, :, :],
                                 tp.labels[train_idx],
+                                track_origins=tp.origins[train_idx],
                                 do_class_balancing=params.get('do_class_balancing', False),
                                 center_tracks=params.get('center_tracks', False),
                                 use_features=params.get('use_features', True),
                                 transform=RandomNoise(sigma=1.))
         val_track_ds = TrackDataset(tp.tracks[val_idx, :, :],
                               tp.labels[val_idx],
+                              track_origins=tp.origins[train_idx],
                               do_class_balancing=params.get('do_class_balancing', False),
                               center_tracks=params.get('center_tracks', False),
                               use_features=params.get('use_features', True))
@@ -235,11 +239,28 @@ def train_rnn_model_cv(params: dict,):
         if torch.cuda.is_available():
             model = model.cuda()
 
-        optimizer = torch.optim.Adadelta(model.parameters(),
-                                    lr=params.get('lr', 0.1),
-                                    weight_decay=params.get('weight_decay', 0.0))
+        params_to_train = [
+            {'params': model.feat_fc.parameters()},
+            {'params': model.clf.parameters()},
+                        ]
+        if params.get('rnn_unit', None) is not None:
+            params_to_train.extend(
+                [{'params': model.rnn.parameters()},
+                {'params': model.rnn_fc.parameters()}],
+            )
+
         if params.get('use_images', False):
-            model.sq.eval()
+            params_to_train.append(
+                {'params': model.im_conv.parameters()},
+            )
+
+        optimizer = torch.optim.Adadelta(
+                        params_to_train,
+                        lr = params.get('lr', 0.1),
+                        weight_decay = params.get('weight_decay', 0.0))
+        if params.get('use_images', False):
+            #model.sq.eval()
+            pass
 
         if params.get('class_weights', False):
             p_discard = float(np.sum(tp.labels.numpy() == 0)/tp.labels.shape[0])
@@ -255,10 +276,27 @@ def train_rnn_model_cv(params: dict,):
 
         criterion = nn.CrossEntropyLoss(weight=class_weights)
 
+        scheduler = None
+        if params.get('use_images', False):
+            def lambda_constant(epoch):
+                return 1.
+            def lambda_wait(epoch):
+                if epoch < 50:
+                    return 0.
+                else:
+                    return 1.
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,
+                                        lr_lambda=[lambda_constant,
+                                                   lambda_constant,
+                                                   lambda_constant,
+                                                   lambda_constant,
+                                                   lambda_constant,])
+
         T = Trainer(model=model,
                     criterion=criterion,
                     dataloaders=dataloaders,
                     optimizer=optimizer,
+                    scheduler=scheduler,
                     out_path=fold_out_path,
                     n_epochs=params.get('n_epochs'),
                     use_images=params.get('use_images', False),
@@ -426,20 +464,141 @@ def predict_qc(params: dict,) -> np.ndarray:
 
     return all_predictions
 
+def train_rf_cv(params):
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.model_selection import cross_val_score
+    import pandas as pd
+    import pickle
+
+    mkdir_f(params.get('out_path'))
+
+    tp = TrackParser(params.get('tracks_dir'),
+                     params.get('all_tracks_glob'),
+                     params.get('kept_tracks_glob'))
+
+    ds = TrackDataset(tp.tracks,
+                      tp.labels,
+                      track_origins=tp.all_tracks_origins,
+                      center_tracks=True,
+                      transform=RandomNoise(sigma=1.))
+
+    X = []
+    for i in range(len(ds)):
+        s = ds[i]
+        X.append(s['features'].unsqueeze(0))
+    X = torch.cat(X, dim=0)
+    X = X.numpy()
+    print('Feature matrix has %d samples and %d features.' % X.shape)
+
+    y = tp.labels.numpy()
+    assert len(y) == X.shape[0]
+    print('%d labels. %f positive class.' % (len(y), np.sum(y)))
+
+    clf = RandomForestClassifier(n_estimators = 500)
+    #Xs = StandardScaler().fit_transform(X)
+    Xs = X
+    scores = cross_val_score(clf, Xs, y, cv=5)
+    print('Cross-val scores:')
+    print(scores)
+    print('Mean:\t%f', scores.mean())
+    print('Std:\t%f', scores.std())
+
+    def pr_fp(clf, X, y):
+        P = clf.predict(X)
+        tp = np.logical_and(P==1, y==1).sum()/len(y)
+        fp = np.logical_and(P==1, y==0).sum()/len(y)
+        tn = np.logical_and(P==0, y==0).sum()/len(y)
+        fn = np.logical_and(P==0, y==1).sum()/len(y)
+        return fp
+
+    precision_recall = cross_val_score(clf, Xs, y, cv=5, scoring=pr_fp)
+    print('Cross-val precision recall:')
+    print(precision_recall)
+    print('False positive mean:')
+    print(np.mean(precision_recall))
+    print('Baseline false positive:')
+    print(1 - (np.sum(y)/len(y)))
+
+    print('Saving model performance...')
+    df = pd.DataFrame(
+        {'Fold': np.arange(5),
+        'Accuracy': scores,
+        'False_positive': precision_recall,
+        'Baseline_accuracy': np.sum(y)/len(y),
+        'Baseline_false_positive': 1 - (np.sum(y)/len(y))}
+    )
+    df.to_csv(osp.join(params['out_path'], 'rf_cv_performance.csv'))
+
+    # train final model
+    clf = RandomForestClassifier(n_estimators = 100)
+    clf.fit(Xs, y)
+    with open(osp.join(params['out_path'], 'rf_weights.pkl'), 'wb') as f:
+        pickle.dump(clf, f)
+    print('Final model saved.')
+
+    print('Testing final model...')
+    return
+
+def predict_rf_qc(params):
+    import pickle
+    import warnings
+    from sklearn.preprocessing import StandardScaler
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        tp = TrackParser(params.get('tracks_dir'),
+                         params.get('all_tracks_glob'),
+                         kept_tracks_glob=None)
+
+    ds = TrackDataset(tp.tracks,
+                      tp.labels,
+                      do_class_balancing=False,
+                      center_tracks=params.get('center_tracks', False),
+                      use_features=params.get('use_features', True))
+
+    X = []
+    for i in range(len(ds)):
+        s = ds[i]
+        X.append(s['features'].unsqueeze(0))
+    X = torch.cat(X, dim=0)
+    X = X.numpy()
+    print('Feature matrix has %d samples and %d features.' % X.shape)
+    #Xs = StandardScaler().fit_transform(X)
+    Xs = X
+    with open(params['model_weights'], 'rb') as f:
+        clf = pickle.load(f)
+
+    predictions = clf.predict(Xs)
+
+    # hard coded rule re: starting positions
+    # don't keep any preds in the top left corner
+    # where bubbles are promiment
+    tl = np.logical_and(X[:,0] < 75, X[:,1] < 75)
+    predictions[tl] = 0
+    print('Predictions sample')
+    print(predictions)
+    print('Kept %d tracks of %d.' % (np.sum(predictions), len(predictions)))
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        tp.clean_track_files(predictions, save_suffix='_qc_model')
+    return
+
 def main():
     import configargparse
     parser = configargparse.ArgParser(description='Train tracking QC models',
-            default_config_files=['./track_qc_config.txt'])
-    parser.add_argument('--config', type=str, help='path to config file')
+        default_config_files=['./track_qc_config.txt'])
+    parser.add_argument('--config', type=str, help='path to config file',
+        is_config_file=True)
     parser.add_argument('command', type=str,
-        help='action to perform: [train,]')
+        help='action to perform: [train, predict, train_rf, predict_rf]')
     parser.add_argument('--tracks_dir', type=str, help='dir containing tracks')
     parser.add_argument('--all_tracks_glob', type=str,
-            default='*densenet*tracks*.csv',
-            help='pattern to match filenames of raw, non-QCed tracks')
+        default='*densenet*tracks*.csv',
+        help='pattern to match filenames of raw, non-QCed tracks')
     parser.add_argument('--kept_tracks_glob', type=str,
-            default='*densenet*tracks*pruned.csv',
-            help='pattern to match filenames of manually QCed tracks derived \
+        default='*densenet*tracks*pruned.csv',
+        help='pattern to match filenames of manually QCed tracks derived \
             from corresponding `all_tracks_glob` files')
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--n_epochs', type=int, default=100)
@@ -492,6 +651,13 @@ def main():
         if params['model_weights'] is None:
             raise ValueError('must supply model weights for predictions!')
         predict_qc(params)
+
+    if args.command.lower() == 'train_rf':
+        train_rf_cv(params)
+    if args.command.lower() == 'predict_rf':
+        if params['model_weights'] is None:
+            raise ValueError('must supply model weights for predictions!')
+        predict_rf_qc(params)
 
 if __name__ == '__main__':
     main()

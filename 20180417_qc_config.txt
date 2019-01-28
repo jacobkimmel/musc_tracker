@@ -1,0 +1,15 @@
+tracks_dir: /media/jkimmel/Laysan/20180417_musc_aging_tl/track_qc_models/data
+all_tracks_glob: *densenet*tracks*.csv
+kept_tracks_glob: *densenet*tracks*pruned.csv
+out_path: /media/jkimmel/Laysan/20180417_musc_aging_tl/track_qc_models/trained
+n_epochs: 150
+lr: 0.1
+batch_size: 128
+do_class_balancing: False
+class_weights: False
+use_features: True
+weight_decay: 1e-4
+rnn_unit: gru
+use_images: False
+img_dir: /media/jkimmel/Laysan/20180417_musc_aging_tl/track_qc_models/data/images
+img_glob: *c1.tif

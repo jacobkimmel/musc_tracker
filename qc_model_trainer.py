@@ -69,6 +69,7 @@ class Trainer(object):
         self.dataloaders = dataloaders
         self.out_path = out_path
         self.use_gpu = use_gpu
+        self.use_images = use_images
         self.verbose = verbose
         self.save_freq = save_freq
         self.best_acc = 0.
@@ -321,6 +322,11 @@ class Trainer(object):
             # run training epoch
             if self.scheduler is not None:
                 self.scheduler.step()
+                print('LEARNING RATES')
+                print('-'*10)
+                for grp in self.optimizer.param_groups:
+                    print(grp['lr'])
+                print('-'*10)
             self.train_epoch()
             with torch.no_grad():
                 val_loss = self.val_epoch()

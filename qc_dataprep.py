@@ -17,6 +17,17 @@ from scipy.misc import imresize
 from sklearn.model_selection import StratifiedKFold
 
 class TrackParser(object):
+    '''
+    Attributes
+    ----------
+    tracks : torch.FloatTensor
+        [N, T, (x,y)] track coordinates.
+    labels : torch.LongTensor
+        [N,] class labels.
+    track_origins : np.ndarray
+        [N,] integer indices indicating the FOV origin for each track.
+
+    '''
     def __init__(self,
                 tracks_dir: str,
                 all_tracks_glob: str,
@@ -78,6 +89,7 @@ class TrackParser(object):
             self.labels = np.zeros(self.all_tracks_NTxy.shape[0])
 
         self.tracks = torch.from_numpy(self.all_tracks_NTxy).float()
+        self.origins = self.all_tracks_origins
         self.labels = torch.from_numpy(self.labels).long()
         return
 
@@ -342,25 +354,37 @@ class TrackDataset(Dataset):
             features = torch.zeros(6).float()
             return features
         track = sample['input']
-        print('track', track.size())
+        #print('track', track.size())
         start_coords = sample['start_coords']
-        total_dist = torch.sqrt(
+        net_dist = torch.sqrt(
             torch.sum(torch.pow(track[-1,:] - track[0,:], 2), dim=0))
-        print('start_coords', start_coords.size())
-        print('total_dist', total_dist.unsqueeze(0).size(), total_dist)
+        #print('start_coords', start_coords.size())
+        #print('total_dist', total_dist.unsqueeze(0).size(), total_dist)
         disp_Txy = track[1:,:] - track[:-1,:]
         disp = torch.sqrt(torch.sum(torch.pow(disp_Txy, 2), dim=1))
-        print('disp', disp.size())
+        total_dist = torch.sum(disp, dim=0)
+        #print('disp', disp.size())
         mean_disp = torch.mean(disp)
         var_disp = torch.std(disp)
         max_disp = torch.max(disp)
         min_disp = torch.min(disp)
+        maxvmean_disp = max_disp/mean_disp
+        qs = np.arange(10, 90, 10)
+        percentiles = np.zeros(len(qs))
+        disp_np = disp.numpy()
+        for i, q in enumerate(qs):
+            percentiles[i] = np.percentile(disp_np, q)
+        percentiles = torch.from_numpy(percentiles).float()
         # N,
         features = torch.cat([start_coords,
+                              net_dist.unsqueeze(0),
                               total_dist.unsqueeze(0),
                               mean_disp.unsqueeze(0),
                               var_disp.unsqueeze(0),
-                              max_disp.unsqueeze(0)]).float()
+                              min_disp.unsqueeze(0),
+                              max_disp.unsqueeze(0),
+                              maxvmean_disp.unsqueeze(0),
+                              percentiles]).float()
         return features
 
     def __len__(self,) -> int:
@@ -406,6 +430,9 @@ class TrackImageDataset(Dataset):
 
         return
 
+    def __len__(self):
+        return len(self.track_ds)
+
     def _imload(self, filename):
         ext = osp.splitext(filename)[-1]
         if 'tif' in ext:
@@ -422,7 +449,6 @@ class TrackImageDataset(Dataset):
             img_idx = sample['track_origin']
 
         txy = self.track_ds.orig_tracks[idx,:, :] # [T, xy]
-        print(txy[0,:])
 
         fov_image = self._imload(self.img_files[img_idx]) # [H, W, C]
         hp, wp = self.bbox_sz[0]//2, self.bbox_sz[1]//2
@@ -468,7 +494,6 @@ class RandomNoise(object):
 '''Image transforms'''
 class ToRGB(object):
     '''Converts 1-channel grayscale images to RGB'''
-
     def __call__(self, sample: dict) -> dict:
         image = sample['image']
         if len(image.shape) == 2:
@@ -527,6 +552,17 @@ class RandomFlip(object):
         sample['image'] = image
         return sample
 
+class RandomImageNoise(object):
+
+    def __init__(self, rate: float=2.):
+        self.rate = rate
+
+    def __call__(self, sample):
+        image = sample['image']
+        noise = np.random.poisson(lam=self.rate, size=image.shape)
+        sample['image'] = image + noise
+        return sample
+
 class Resize(object):
     '''Resizes images'''
 
@@ -555,6 +591,7 @@ imgnet_norm = transforms.Normalize(mean=[0.485, 0.456, 0.406],
 
 '''Transformer Zoo'''
 imgnet_trans = transforms.Compose([Resize(size=(224,224,1)),
+                                 RandomImageNoise(rate=3.),
                                  RandomFlip(),
                                  ToRGB(),
                                  ImageToTensor(norm=imgnet_norm),]

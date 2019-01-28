@@ -1,0 +1,14 @@
+tracks_dir: /media/jkimmel/Dove/20180216_aging_lrc_tl/track_qc_models/data
+all_tracks_glob: *densenet*tracks*.csv
+kept_tracks_glob: *densenet*tracks*pruned.csv
+out_path: /media/jkimmel/Dove/20180216_aging_lrc_tl/track_qc_models/trained
+n_epochs: 150
+lr: 0.1
+batch_size: 128
+do_class_balancing: False
+class_weights: False
+use_features: True
+weight_decay: 1e-4
+rnn_unit: None
+use_images: False
+model_weights: /media/jkimmel/Dove/20180216_aging_lrc_tl/track_qc_models/trained/rf_weights.pkl
