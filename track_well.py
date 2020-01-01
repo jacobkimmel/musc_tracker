@@ -125,8 +125,10 @@ if __name__ == '__main__':
     part_track = partial(track, xys=xys, args=args)
 
     if args.app_model or args.singlethread:
+        res = []
         for xy in range(len(xys)):
-            track(xy, xys, args)
+            r = track(xy, xys, args)
+            res.append(r)
     else:
         p = multiprocessing.Pool()
 
